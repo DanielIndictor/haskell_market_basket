@@ -8,6 +8,7 @@ import qualified Data.IntMap as IntMap
 import qualified Data.IntSet as IntSet
 import Control.DeepSeq (($!!))
 import Data.Tree
+import Foreign (withArray, with)
 
 type TIDMap = IntMap.IntMap IntSet.IntSet
 
@@ -31,11 +32,17 @@ getFreqTree minSup tidMap = rootItemsets
     rootItemsets = unfoldForest to_1_itemset transactions
     to_1_itemset items = (ILabel {getParent=Nothing, getItemID=IntSet.size items, getOrders=items}, [])
 
+binaryFold
+
 -- This takes a list of transactions and makes it into a map from transaction ID's to orders.
 -- Each transaction must have distinct items in ascending order.
 transposeOrders :: [[Int]] -> TIDMap
-transposeOrders _ = error "Implementation below is wrong and dumb."
--- transposeOrders = IntMap.fromDistinctAscList . zip [0..] . map IntSet.fromDistinctAscList
+-- Start counting transaction ID's at 1 to match them with line numbers
+-- from source files.
+transposeOrders = IntMap.unionsWith IntSet.union . zipWith transposeRow [1..]
+  where
+    transposeRow :: Int -> [Int] -> TIDMap
+    transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
 
 mkOrders :: String -> Maybe [[Int]]
 mkOrders = mapM orderFromLine . lines
