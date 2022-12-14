@@ -7,8 +7,8 @@ import qualified System.Environment as Environment
 import qualified Data.IntMap as IntMap
 import qualified Data.IntSet as IntSet
 import Control.DeepSeq (($!!))
+import Control.Parallel.Strategies
 import Data.Tree
-import Foreign (withArray, with)
 
 type TIDMap = IntMap.IntMap IntSet.IntSet
 
@@ -32,17 +32,34 @@ getFreqTree minSup tidMap = rootItemsets
     rootItemsets = unfoldForest to_1_itemset transactions
     to_1_itemset items = (ILabel {getParent=Nothing, getItemID=IntSet.size items, getOrders=items}, [])
 
-binaryFold
+binaryFold :: (a -> a -> a) -> [a] -> [a]
+binaryFold f (x1:x2:xs) = binaryFold f $ f x1 x2 : binaryFold f xs
+binaryFold _ [x] = [x]
+binaryFold _ [] = []
 
 -- This takes a list of transactions and makes it into a map from transaction ID's to orders.
 -- Each transaction must have distinct items in ascending order.
+-- transaction ID's start at 1 to match source file line numbers.
 transposeOrders :: [[Int]] -> TIDMap
--- Start counting transaction ID's at 1 to match them with line numbers
--- from source files.
-transposeOrders = IntMap.unionsWith IntSet.union . zipWith transposeRow [1..]
+transposeOrders = transposeOrders2
+
+transposeOrders1 = IntMap.unionsWith IntSet.union . binaryFold (IntMap.unionWith IntSet.union) . zipWith transposeRow [1..]
   where
     transposeRow :: Int -> [Int] -> TIDMap
     transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
+
+transposeOrders2 = IntMap.unionsWith IntSet.union . chunkEval . zipWith transposeRow [1..]
+  where
+    transposeRow :: Int -> [Int] -> TIDMap
+    transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
+    chunkEval = id
+--    chunkEval = withStrategy (parListChunk transposeChunkSize rpar)
+    transposeChunkSize = 100
+
+transposeOrders3 = IntMap.fromListWith IntSet.union . concat . zipWith transposeRow [1..]
+  where
+    transposeRow :: Int -> [Int] -> [(Int, IntSet.IntSet)]
+    transposeRow tid order = [(itm, IntSet.singleton tid) | itm <- order]
 
 mkOrders :: String -> Maybe [[Int]]
 mkOrders = mapM orderFromLine . lines
@@ -73,21 +90,21 @@ maybeToEither left Nothing = Left left
 readOrdersFromFile :: String -> IO (Either String [[Int]])
 readOrdersFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do 
   contents <- IO.hGetContents handle
-  let maybeOrders = mkOrders contents
   return $!! maybeToEither err (mkOrders contents)
   ) 
   where err = "Error: '" ++ filename ++ "' incorrectly formatted.\
               \    It should contain newline-separated transactions,\
               \    Items in the transaction must be in ascending order."
 
+main :: IO ()
 main = do
  args <- Environment.getArgs
  case args of 
    [filename, minSupArg] -> do
-     orders <- readOrdersFromFile filename
-     let sup = readMinSup minSupArg
+     eitherErrorOrders <- readOrdersFromFile filename
+     let eitherErrorMinSup = readMinSup minSupArg
 
-     case (,) <$> orders <*> sup of
+     case (,) <$> eitherErrorOrders <*> eitherErrorMinSup of
        Left err -> do 
          putStrLn err
          Exit.exitWith (Exit.ExitFailure 1)
@@ -96,7 +113,8 @@ main = do
          let minSupCount = minSupCountFromArg sup (length orders)
          let tidmap = transposeOrders orders
          print minSupCount
-         print tidmap
+         print $ IntMap.size tidmap
+         -- print $ getFreqTree 
 
    _usage -> do
      progName <- Environment.getProgName
