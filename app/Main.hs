@@ -96,10 +96,10 @@ readMinSup :: String -> Either String NumericArg
 readMinSup arg = case Read.readMaybe arg of
   (Just count) | count < 0 -> Left "Error: minSup must be nonnegative!"
   (Just count) -> Right $ ArgRawCount count
-  Nothing -> case Read.readMaybe arg of
+  Nothing -> case (Read.readMaybe arg :: Maybe Double) of
     (Just frac) | frac < 0 -> Left "Error: minSup must be nonnegative!"
-    (Just frac) | frac > 0 -> Left "Error: minSup must be less than one if decimal!"
-    (Just frac) -> Right $ ArgPercentage frac
+    (Just frac) | frac > 1 -> Left "Error: minSup must be less than one if decimal!"
+    (Just frac) -> Right $ ArgPercentage $ toRational frac
     Nothing -> Left "Error: Unable to interpret minSup as integer or double."
 
 minSupCountFromArg :: NumericArg -> Int -> Int
@@ -140,7 +140,7 @@ main = do
          print $ IntMap.size tidmap
          let fForest = getFreqForest minSupCount tidmap
          putStrLn $ drawForest $ fmap (fmap show) fForest 
-         putStrLn $ show $ getMaximalPaths fForest
+         print $ getMaximalPaths fForest
 
    _usage -> do
      progName <- Environment.getProgName
