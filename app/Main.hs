@@ -12,54 +12,78 @@ import Data.Tree
 
 type TIDMap = IntMap.IntMap IntSet.IntSet
 
-data ILabel = ILabel 
-  { getItemID :: !Int
-  , getParent :: !(Maybe (Tree ILabel))
-  , getOrders :: !IntSet.IntSet
-  }
-  deriving (Eq)
+type ITree = Tree Int
 
-instance Show ILabel where
-  show label = show (getItemID label, getItemID label)
+data ISeed = ISeed { thisInt :: !Int, getUncheckedChildren :: ![Int], getOrders :: !IntSet.IntSet }
+  deriving (Show, Eq, Ord)
 
-type ITree = Tree ILabel
+-- > > headAndTails [1,2,3,4,5]
+-- > [(1,[2,3,4,5]),(2,[3,4,5]),(3,[4,5]),(4,[5]),(5,[])]
+headAndTails :: [a] -> [(a, [a])]
+headAndTails [] = []
+headAndTails (x : xs) = (x, xs) : headAndTails xs
 
-getFreqTree :: Int -> TIDMap -> [ITree]
-getFreqTree minSup tidMap = rootItemsets
+getMaximalPaths :: [Tree a] -> [[a]]
+getMaximalPaths = concatMap (foldTree f)
+  where
+    f x [] = [[x]]
+    f x paths = (x:) <$> concat paths
+
+getFreqForest :: Int -> TIDMap -> [ITree]
+getFreqForest minSup tidMap = rootItemsets
   where 
-    transactions = IntMap.elems tidMap
-    allItems = IntSet.unions transactions
-    rootItemsets = unfoldForest to_1_itemset transactions
-    to_1_itemset items = (ILabel {getParent=Nothing, getItemID=IntSet.size items, getOrders=items}, [])
+    rootItemsets = unfoldForest blowup oneSeeds
+    items = IntMap.keys tidMap
+    oneSeeds :: [ISeed]
+    oneSeeds = [ISeed itm childItms childOrders 
+      | (itm, childItms) <- headAndTails items
+      , let childOrders =  tidMap IntMap.! itm
+      , minSup <= IntSet.size childOrders
+      ]
+    blowup :: ISeed -> (Int, [ISeed])
+    blowup (ISeed this unChildren orders) = (this, [
+      ISeed itm childItms childOrders
+      | (itm, childItms) <- headAndTails unChildren
+      , let childOrders = IntSet.intersection orders (tidMap IntMap.! itm)
+      , minSup <= IntSet.size childOrders
+      ])
 
+-- Example:
+-- > > data Node = D Node Node | S Int
+-- > > binaryFold D [S 1, S 2, S 3, S 4]
+-- > [D (D (S 1) (S 2)) (D (S 3) (S 4))]
+-- > > binaryFold D [S 1, S 2, S 3, S 4, S 5]
+-- > [D (D (D (S 1) (S 2)) (D (S 3) (S 4))) (S 5)]
 binaryFold :: (a -> a -> a) -> [a] -> [a]
-binaryFold f (x1:x2:xs) = binaryFold f $ f x1 x2 : binaryFold f xs
-binaryFold _ [x] = [x]
 binaryFold _ [] = []
+binaryFold _ [x] = [x]
+binaryFold f xs = binaryFold f $ collapse xs
+  where 
+    collapse (x1:x2:xs') = f x1 x2 : collapse xs'
+    collapse xs' = xs'
 
 -- This takes a list of transactions and makes it into a map from transaction ID's to orders.
 -- Each transaction must have distinct items in ascending order.
 -- transaction ID's start at 1 to match source file line numbers.
 transposeOrders :: [[Int]] -> TIDMap
-transposeOrders = transposeOrders2
-
-transposeOrders1 = IntMap.unionsWith IntSet.union . binaryFold (IntMap.unionWith IntSet.union) . zipWith transposeRow [1..]
+transposeOrders = transposeOrders1
   where
-    transposeRow :: Int -> [Int] -> TIDMap
-    transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
-
-transposeOrders2 = IntMap.unionsWith IntSet.union . chunkEval . zipWith transposeRow [1..]
-  where
-    transposeRow :: Int -> [Int] -> TIDMap
-    transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
-    chunkEval = id
---    chunkEval = withStrategy (parListChunk transposeChunkSize rpar)
-    transposeChunkSize = 100
-
-transposeOrders3 = IntMap.fromListWith IntSet.union . concat . zipWith transposeRow [1..]
-  where
-    transposeRow :: Int -> [Int] -> [(Int, IntSet.IntSet)]
-    transposeRow tid order = [(itm, IntSet.singleton tid) | itm <- order]
+    transposeOrders1 = IntMap.unionsWith IntSet.union . binaryFold (IntMap.unionWith IntSet.union) . zipWith transposeRow [1..]
+      where
+        transposeRow :: Int -> [Int] -> TIDMap
+        transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
+    transposeOrders2 = IntMap.unionsWith IntSet.union . chunkEval . zipWith transposeRow [1..]
+      where
+        transposeRow :: Int -> [Int] -> TIDMap
+        transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
+        chunkEval = id
+         --    chunkEval = withStrategy (parListChunk transposeChunkSize rpar)
+        transposeChunkSize = 100
+    
+    transposeOrders3 = IntMap.fromListWith IntSet.union . concat . zipWith transposeRow [1..]
+      where
+        transposeRow :: Int -> [Int] -> [(Int, IntSet.IntSet)]
+        transposeRow tid order = [(itm, IntSet.singleton tid) | itm <- order]
 
 mkOrders :: String -> Maybe [[Int]]
 mkOrders = mapM orderFromLine . lines
@@ -114,7 +138,9 @@ main = do
          let tidmap = transposeOrders orders
          print minSupCount
          print $ IntMap.size tidmap
-         -- print $ getFreqTree 
+         let fForest = getFreqForest minSupCount tidmap
+         putStrLn $ drawForest $ fmap (fmap show) fForest 
+         putStrLn $ show $ getMaximalPaths fForest
 
    _usage -> do
      progName <- Environment.getProgName
