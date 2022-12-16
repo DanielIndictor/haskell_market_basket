@@ -1,13 +1,18 @@
 module Main where
 
+import Utils
+
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as BC
 import qualified Text.Read as Read
 import qualified System.Exit as Exit
 import qualified System.IO as IO
 import qualified System.Environment as Environment
 import qualified Data.IntMap as IntMap
 import qualified Data.IntSet as IntSet
-import Control.DeepSeq (($!!))
+import Control.DeepSeq (deepseq, ($!!))
 import Control.Parallel.Strategies
+import Control.Monad.Loops (whileM)
 import Data.Tree
 
 type TIDMap = IntMap.IntMap IntSet.IntSet
@@ -17,11 +22,8 @@ type ITree = Tree Int
 data ISeed = ISeed { thisInt :: !Int, getUncheckedChildren :: ![Int], getOrders :: !IntSet.IntSet }
   deriving (Show, Eq, Ord)
 
--- > > headAndTails [1,2,3,4,5]
--- > [(1,[2,3,4,5]),(2,[3,4,5]),(3,[4,5]),(4,[5]),(5,[])]
-headAndTails :: [a] -> [(a, [a])]
-headAndTails [] = []
-headAndTails (x : xs) = (x, xs) : headAndTails xs
+aprioriStrategy :: Strategy [ITree]
+aprioriStrategy = evalList rdeepseq
 
 getMaximalPaths :: [Tree a] -> [[a]]
 getMaximalPaths = concatMap (foldTree f)
@@ -41,53 +43,61 @@ getFreqForest minSup tidMap = rootItemsets
       , minSup <= IntSet.size childOrders
       ]
     blowup :: ISeed -> (Int, [ISeed])
-    blowup (ISeed this unChildren orders) = (this, [
-      ISeed itm childItms childOrders
-      | (itm, childItms) <- headAndTails unChildren
-      , let childOrders = IntSet.intersection orders (tidMap IntMap.! itm)
-      , minSup <= IntSet.size childOrders
-      ])
+    blowup (ISeed this unChildren orders) = (this, seeds)
+     where 
+       seeds = 
+         [ ISeed itm childItms childOrders
+         | (itm, childItms) <- headAndTails unChildren
+         , let childOrders = IntSet.intersection orders (tidMap IntMap.! itm)
+         , minSup <= IntSet.size childOrders
+         ]
 
 -- Example:
--- > > data Node = D Node Node | S Int
--- > > binaryFold D [S 1, S 2, S 3, S 4]
--- > [D (D (S 1) (S 2)) (D (S 3) (S 4))]
--- > > binaryFold D [S 1, S 2, S 3, S 4, S 5]
--- > [D (D (D (S 1) (S 2)) (D (S 3) (S 4))) (S 5)]
-binaryFold :: (a -> a -> a) -> [a] -> [a]
-binaryFold _ [] = []
-binaryFold _ [x] = [x]
-binaryFold f xs = binaryFold f $ collapse xs
-  where 
-    collapse (x1:x2:xs') = f x1 x2 : collapse xs'
-    collapse xs' = xs'
+-- > > data Node = D [Node] | S Int
+-- > > nAryFold 2 D (S 0) (map S [1..4])
+-- > D [D [D [S 1,S 2],D [S 3,S 4]],S 0]
+nAryFold :: Int -> ([a] -> a) -> a -> [a] -> a
+nAryFold _ f def  [] = f [def]
+nAryFold _ f def [x] = f [x, def]
+nAryFold n f def  xs = nAryFold n f def foldedChunks
+  where foldedChunks = rseq `parMap` f $ chunksOf n xs
 
 -- This takes a list of transactions and makes it into a map from transaction ID's to orders.
 -- Each transaction must have distinct items in ascending order.
 -- transaction ID's start at 1 to match source file line numbers.
 transposeOrders :: [[Int]] -> TIDMap
-transposeOrders = transposeOrders1
+transposeOrders = nAryFold n (IntMap.unionsWith IntSet.union) IntMap.empty . zipWith transposeRow [1..]
   where
-    transposeOrders1 = IntMap.unionsWith IntSet.union . binaryFold (IntMap.unionWith IntSet.union) . zipWith transposeRow [1..]
-      where
-        transposeRow :: Int -> [Int] -> TIDMap
-        transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
-    transposeOrders2 = IntMap.unionsWith IntSet.union . chunkEval . zipWith transposeRow [1..]
-      where
-        transposeRow :: Int -> [Int] -> TIDMap
-        transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
-        chunkEval = id
-         --    chunkEval = withStrategy (parListChunk transposeChunkSize rpar)
-        transposeChunkSize = 100
-    
-    transposeOrders3 = IntMap.fromListWith IntSet.union . concat . zipWith transposeRow [1..]
-      where
-        transposeRow :: Int -> [Int] -> [(Int, IntSet.IntSet)]
-        transposeRow tid order = [(itm, IntSet.singleton tid) | itm <- order]
+    n = 100
+    transposeRow :: Int -> [Int] -> TIDMap
+    transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
 
-mkOrders :: String -> Maybe [[Int]]
-mkOrders = mapM orderFromLine . lines
-  where orderFromLine = mapM Read.readMaybe . words
+mkOrder :: B.ByteString -> Maybe [Int]
+mkOrder = sequence . getInts
+  where
+    getInts :: B.ByteString -> [Maybe Int]
+    getInts b | B.null b = []
+    getInts b | B.head b == 32 = getInts $ B.tail b  -- ' ' == 32
+    getInts b = case BC.readInt b of
+      Just (i, remainder) -> Just i : getInts remainder
+      Nothing -> [Nothing]
+
+-- Reads orders from the file.
+readOrdersFromFile :: String -> IO (Either String [[Int]])
+readOrdersFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do 
+  -- IO.hGetBuffering handle >>= print
+  -- IO.hSetBuffering handle $ IO.BlockBuffering (Just 123)
+  -- IO.hGetBuffering handle >>= print
+  inputLines <- whileM (not <$> IO.hIsEOF handle) (B.hGetLine handle) :: IO [B.ByteString]
+  case sequence . withParStrat $ map mkOrder inputLines of
+    Just orders -> return $!! Right orders
+    Nothing -> return (Left err)
+  ) 
+  where 
+    withParStrat = withStrategy $ parListChunk 5000 rdeepseq
+    err = "Error: '" ++ filename ++ "' incorrectly formatted.\
+          \    It should contain newline-separated transactions,\
+          \    Items in the transaction must be in ascending order."
 
 data NumericArg = ArgPercentage !Rational | ArgRawCount !Int
 
@@ -106,19 +116,6 @@ minSupCountFromArg :: NumericArg -> Int -> Int
 minSupCountFromArg (ArgRawCount count) _ = count
 minSupCountFromArg (ArgPercentage frac) nOrders = floor $ frac * toRational nOrders
 
-maybeToEither :: b -> Maybe a -> Either b a
-maybeToEither _ (Just x) = Right x
-maybeToEither left Nothing = Left left
-
--- Reads orders from the file.
-readOrdersFromFile :: String -> IO (Either String [[Int]])
-readOrdersFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do 
-  contents <- IO.hGetContents handle
-  return $!! maybeToEither err (mkOrders contents)
-  ) 
-  where err = "Error: '" ++ filename ++ "' incorrectly formatted.\
-              \    It should contain newline-separated transactions,\
-              \    Items in the transaction must be in ascending order."
 
 main :: IO ()
 main = do
@@ -128,19 +125,21 @@ main = do
      eitherErrorOrders <- readOrdersFromFile filename
      let eitherErrorMinSup = readMinSup minSupArg
 
-     case (,) <$> eitherErrorOrders <*> eitherErrorMinSup of
+     case (,) <$> eitherErrorMinSup <*> eitherErrorOrders of
        Left err -> do 
          putStrLn err
          Exit.exitWith (Exit.ExitFailure 1)
 
-       Right (orders, sup) -> do
+       Right (sup, orders) -> do
          let minSupCount = minSupCountFromArg sup (length orders)
-         let tidmap = transposeOrders orders
          print minSupCount
-         print $ IntMap.size tidmap
-         let fForest = getFreqForest minSupCount tidmap
-         putStrLn $ drawForest $ fmap (fmap show) fForest 
-         print $ getMaximalPaths fForest
+         
+         print $ orders `deepseq` "evaluated orders!"
+         -- let tidmap = transposeOrders orders
+         -- print minSupCount
+         -- print $ IntMap.size tidmap
+         -- let fForest = withStrategy aprioriStrategy $ getFreqForest minSupCount tidmap
+         -- mapM_ print $ getMaximalPaths fForest
 
    _usage -> do
      progName <- Environment.getProgName
