@@ -11,7 +11,6 @@ import qualified System.IO as IO
 import qualified System.Environment as Environment
 import qualified Data.IntMap as IntMap
 import qualified Data.IntSet as IntSet
-import Control.DeepSeq (($!!))
 import Control.Parallel.Strategies
 import Control.Monad.Loops (whileM)
 import Data.Tree
@@ -63,21 +62,24 @@ getFreqForest minSup tidMap = rootItemsets
 -- > > data Node = D [Node] | S Int
 -- > > nAryFold 2 D (S 0) (map S [1..4])
 -- > D [D [D [S 1,S 2],D [S 3,S 4]],S 0]
-nAryFold :: (NFData a) => Int -> ([a] -> a) -> a -> [a] -> a
-nAryFold _ f emp  [] = f [emp]
-nAryFold _ f emp [x] = f [x, emp]
-nAryFold n f emp  xs = nAryFold n f emp foldedChunks
+nAryFold :: (NFData a) => Int -> ([a] -> a) -> [a] -> a
+nAryFold _ f  [] = f []
+nAryFold _ f [x] = f [x]
+nAryFold n f  xs = nAryFold n f foldedChunks
   where foldedChunks = rdeepseq `parMap` f $ chunksOf n xs
 
--- This takes a list of transactions and makes it into a map from transaction ID's to orders.
+
+mergeTIDMaps :: [TIDMap] -> TIDMap
+mergeTIDMaps = nAryFold n (IntMap.unionsWith IntSet.union)
+  where n=50
+
+-- This takes a list of (transaction ID, transaction) pairs and makes it into a map from transaction ID's to orders.
 -- Each transaction must have distinct items in ascending order.
--- transaction ID's start at 1 to match source file line numbers.
-transposeOrders :: [[Int]] -> TIDMap
-transposeOrders = nAryFold n (IntMap.unionsWith IntSet.union) IntMap.empty . zipWith transposeRow [1..]
+transposeOrders :: [(Int, [Int])] -> TIDMap
+transposeOrders =  IntMap.unionsWith IntSet.union . map transposeRow
   where
-    n = 1000
-    transposeRow :: Int -> [Int] -> TIDMap
-    transposeRow tid order = IntMap.fromDistinctAscList $ [(itm, IntSet.singleton tid) | itm <- order]
+    transposeRow :: (Int, [Int]) -> TIDMap
+    transposeRow (tid, order) = IntMap.fromDistinctAscList [(itm, IntSet.singleton tid) | itm <- order]
 
 mkOrder :: B.ByteString -> Maybe [Int]
 mkOrder = sequence . getInts
@@ -93,12 +95,17 @@ mkOrder = sequence . getInts
 readTIDMapFromFile :: String -> IO (Either String (TIDMap, Int))
 readTIDMapFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do 
   inputLines <- whileM (not <$> IO.hIsEOF handle) (B.hGetLine handle) :: IO [B.ByteString]
-  case sequence . withParStrat $ map mkOrder inputLines of
-    Just orders -> return $!! Right (transposeOrders orders, length orders)
+  let mOrders = map mkOrder inputLines :: [Maybe [Int]]
+  let mTIDOrderPairs = zipWith (fmap . (,)) [1..] mOrders :: [Maybe (Int, [Int])]
+  let tidmaps = withParStrat $ map (fmap transposeOrders . sequence) $ chunksOf n mTIDOrderPairs :: [Maybe TIDMap]
+  let mTIDMap = mergeTIDMaps <$> sequence tidmaps :: Maybe TIDMap
+  case mTIDMap of
+    Just tidmap -> return $ Right (tidmap, length inputLines)
     Nothing -> return (Left err)
   ) 
   where 
-    withParStrat = withStrategy $ parListChunk 5000 rdeepseq
+    n = 1000
+    withParStrat = withStrategy $ parList rdeepseq
     err = "Error: '" ++ filename ++ "' incorrectly formatted.\
           \    It should contain newline-separated transactions,\
           \    Items in the transaction must be in ascending order."
@@ -135,10 +142,10 @@ main = do
          Exit.exitWith (Exit.ExitFailure 1)
 
        Right (sup, (tidmap, nOrders)) -> do
+         putStrLn "got tidmap!"
          let minSupCount = minSupCountFromArg sup nOrders
          putStr "Minimum support: "
          print minSupCount
-         
          putStrLn "The paths to leaves are:"
          let fForest = withStrategy aprioriStrategy $ getFreqForest minSupCount tidmap
          mapM_ print $ getPathsToLeaves fForest
