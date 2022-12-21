@@ -1,7 +1,6 @@
 module Main where
 
 import Utils
---import qualified MoodyIntSet
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
@@ -11,64 +10,74 @@ import qualified System.IO as IO
 import qualified System.Environment as Environment
 import qualified Data.IntMap as IntMap
 import qualified Data.IntSet as IntSet
+import qualified Data.Tree as Tree
 import Control.Parallel.Strategies
 import Control.Monad.Loops (whileM)
-import Data.Tree
+import Data.Foldable (foldl')
+import Data.List (sortOn)
 
 type TIDMap = IntMap.IntMap IntSet.IntSet
 
-type ITree = Tree Int
+type ITree = Tree.Tree Int
 
-data ISeed = ISeed { thisInt :: !Int, getUncheckedChildren :: ![Int], getOrders :: !IntSet.IntSet }
+-- Terminology comes from max-miner paper, except for "getOrders", 
+-- which stands for "the set of transactions containing the itemset represented by this node."
+data ISeed = ISeed { getLastItemInHead :: !Int, getTail :: ![Int], getOrders :: !IntSet.IntSet }
   deriving (Show, Eq)
 
 aprioriStrategy :: Strategy [ITree]
 aprioriStrategy = parList stratITree
   where 
     stratITree :: Strategy ITree
-    stratITree (Node rLabel children) = do 
-      children' <- parListChunk 25 rdeepseq children
-      return $ Node rLabel children'
+    stratITree (Tree.Node rLabel children) = do 
+      children' <- parListChunk 10 rdeepseq children
+      return $ Tree.Node rLabel children'
 
-getPathsToLeaves :: [Tree a] -> [[a]]
-getPathsToLeaves = concatMap (foldTree f)
+getPathsToLeaves :: [Tree.Tree a] -> [[a]]
+getPathsToLeaves = concatMap (Tree.foldTree f)
   where
     f x [] = [[x]]
     f x paths = (x:) <$> concat paths
 
+genPruneCands :: Int -> TIDMap -> ISeed -> [(Int, IntSet.IntSet)]
+genPruneCands minSup tidMap (ISeed _ unChildren orders) = 
+  [ (candidate, candidateOrders) 
+  | candidate <- unChildren
+  , let candidateOrders = IntSet.intersection orders (tidMap IntMap.! candidate)
+  , minSup <= IntSet.size candidateOrders  -- Pruning step
+  ]
+
+bootstrapGenPruneCands :: Int -> TIDMap -> [(Int, IntSet.IntSet)]
+bootstrapGenPruneCands minSup = filter ((>=minSup) . IntSet.size . snd) . IntMap.toAscList 
+
+maxMinerCandReorder :: [(Int, IntSet.IntSet)] -> [(Int, IntSet.IntSet)]
+maxMinerCandReorder =  sortOn (IntSet.size . snd)
+
+packCands :: [(Int, IntSet.IntSet)] -> [ISeed]
+packCands candidates = let (items, orders) = unzip candidates
+  in zipWith packSeed (headAndTails items) orders
+  where packSeed (item, uncheckedItems) order = ISeed item uncheckedItems order
+
 getFreqForest :: Int -> TIDMap -> [ITree]
 getFreqForest minSup tidMap = rootItemsets
   where 
-    rootItemsets = unfoldForest blowup oneSeeds
-    items = IntMap.keys tidMap
+    candGenPruner = genPruneCands minSup tidMap
+    rootItemsets = Tree.unfoldForest blowup oneSeeds
+    -- Here we bootstrap search similarly to genPruneCands
     oneSeeds :: [ISeed]
-    oneSeeds = [ISeed itm childItms childOrders 
-      | (itm, childItms) <- headAndTails items
-      , let childOrders =  tidMap IntMap.! itm
-      , minSup <= IntSet.size childOrders
-      ]
+    oneSeeds = packCands $ maxMinerCandReorder $ bootstrapGenPruneCands minSup tidMap 
+
     blowup :: ISeed -> (Int, [ISeed])
-    blowup (ISeed this unChildren orders) = (this, seeds)
-     where 
-       seeds = 
-         [ ISeed itm childItms childOrders
-         | (itm, childItms) <- headAndTails unChildren
-         , let childOrders = IntSet.intersection orders (tidMap IntMap.! itm)
-         , minSup <= IntSet.size childOrders
-         ]
+    blowup seed = (getLastItemInHead seed, (packCands . maxMinerCandReorder . candGenPruner) seed)
 
--- A bit obvious, but it parallelizes, so choose a good N!
--- Example:
--- > > data Node = D [Node] | S Int
--- > > nAryFold 2 D (S 0) (map S [1..4])
--- > D [D [D [S 1,S 2],D [S 3,S 4]],S 0]
-nAryFold :: (NFData a) => Int -> ([a] -> a) -> [a] -> a
-nAryFold _ f  [] = f []
-nAryFold _ f [x] = f [x]
-nAryFold n f  xs = nAryFold n f foldedChunks
-  where foldedChunks = rdeepseq `parMap` f $ chunksOf n xs
+toMaximalItemsets :: [[Int]] -> [IntSet.IntSet]
+toMaximalItemsets itemsets = foldl' prependIfNew [] itemsets'
+  where 
+    itemsets' = sortOn (\set -> ((-1)* IntSet.size set, set)) $ fmap IntSet.fromList itemsets
+    prependIfNew maximals unseenISet | any (IntSet.isSubsetOf unseenISet) maximals = maximals
+    prependIfNew maximals unseenISet  = unseenISet : maximals
 
-
+-- Transactions read in in chunks and converted into mini-TIDMaps, which are then finally combined with mergeTIDMaps
 mergeTIDMaps :: [TIDMap] -> TIDMap
 mergeTIDMaps = nAryFold n (IntMap.unionsWith IntSet.union)
   where n=50
@@ -81,6 +90,7 @@ transposeOrders =  IntMap.unionsWith IntSet.union . map transposeRow
     transposeRow :: (Int, [Int]) -> TIDMap
     transposeRow (tid, order) = IntMap.fromDistinctAscList [(itm, IntSet.singleton tid) | itm <- order]
 
+-- Extracts integers from a lines of a transaction file.
 mkOrder :: B.ByteString -> Maybe [Int]
 mkOrder = sequence . getInts
   where
@@ -97,6 +107,7 @@ readTIDMapFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do
   inputLines <- whileM (not <$> IO.hIsEOF handle) (B.hGetLine handle) :: IO [B.ByteString]
   let mOrders = map mkOrder inputLines :: [Maybe [Int]]
   let mTIDOrderPairs = zipWith (fmap . (,)) [1..] mOrders :: [Maybe (Int, [Int])]
+  -- These are the mini-TIDMaps
   let tidmaps = withParStrat $ map (fmap transposeOrders . sequence) $ chunksOf n mTIDOrderPairs :: [Maybe TIDMap]
   let mTIDMap = mergeTIDMaps <$> sequence tidmaps :: Maybe TIDMap
   case mTIDMap of
@@ -127,7 +138,6 @@ minSupCountFromArg :: NumericArg -> Int -> Int
 minSupCountFromArg (ArgRawCount count) _ = count
 minSupCountFromArg (ArgPercentage frac) nOrders = floor $ frac * toRational nOrders
 
-
 main :: IO ()
 main = do
  args <- Environment.getArgs
@@ -148,7 +158,7 @@ main = do
          print minSupCount
          putStrLn "The paths to leaves are:"
          let fForest = withStrategy aprioriStrategy $ getFreqForest minSupCount tidmap
-         mapM_ print $ getPathsToLeaves fForest
+         mapM_ print $ fmap IntSet.toList $ reverse $ toMaximalItemsets $ getPathsToLeaves fForest
 
    _usage -> do
      progName <- Environment.getProgName
