@@ -23,9 +23,11 @@ import Data.List (sortOn)
 type TIDMap = IntMap.IntMap IntSet.IntSet
 type ITree = Tree.Tree Int
 
--- Terminology below comes from max-miner paper, except for "getOrders", 
--- which stands for "the set of transactions containing the itemset represented by this node."
-data ISeed = ISeed { getLastItemInHead :: !Int, getTail :: ![Int], getOrders :: !IntSet.IntSet }
+-- Terminology below comes from max-miner paper, except for "getOrders", which stands for 
+-- "the set of transactions containing the itemset represented by this node."
+data ISeed = ISeed { getLastItemInHead :: !Int, 
+                     getTail :: ![Int], 
+                    getOrders :: !IntSet.IntSet }
   deriving (Show, Eq)
 
 
@@ -57,7 +59,8 @@ getFreqForest minSup tidMap = Tree.unfoldForest blowup oneSeeds
     oneSeeds = packCands $ maxMinerCandReorder $ bootstrapGenPruneCands minSup tidMap 
 
     blowup :: ISeed -> (Int, [ISeed])
-    blowup seed = (getLastItemInHead seed, (packCands . maxMinerCandReorder . candGenPruner) seed)
+    blowup seed = (getLastItemInHead seed, 
+                   (packCands . maxMinerCandReorder . candGenPruner) seed)
 
 -- Decouple parallelization strategy from evaluation, as advised in class.
 aprioriStrategy :: Strategy [ITree]
@@ -65,7 +68,7 @@ aprioriStrategy = parList stratITree
   where 
     stratITree :: Strategy ITree
     stratITree (Tree.Node rLabel children) = do 
-      children' <- parListChunk 10 rdeepseq children
+      children' <- parListChunk 25 rdeepseq children
       return $ Tree.Node rLabel children'
 
 -- This is a debug function that, inefficiently,
@@ -77,9 +80,11 @@ aprioriStrategy = parList stratITree
 toMaximalItemsets :: [[Int]] -> [IntSet.IntSet]
 toMaximalItemsets itemsets = foldl' prependIfNew [] itemsets'
   where 
-    itemsets' = sortOn (\set -> ((-1)* IntSet.size set, set)) $ fmap IntSet.fromList itemsets
-    prependIfNew maximals unseenISet | any (IntSet.isSubsetOf unseenISet) maximals = maximals
-    prependIfNew maximals unseenISet  = unseenISet : maximals
+    itemsets' = sortSizeThenVal $ fmap IntSet.fromList itemsets
+    sortSizeThenVal = sortOn (\set -> (-(IntSet.size set), set))
+    prependIfNew maximals unseenISet | unseenISet `isRedundant` maximals = maximals
+    prependIfNew maximals unseenISet = unseenISet : maximals
+    iSet `isRedundant` iSets = any (IntSet.isSubsetOf iSet) iSets
 
 --
 -- The code below provides functions for reading in a list of transactions
@@ -87,12 +92,14 @@ toMaximalItemsets itemsets = foldl' prependIfNew [] itemsets'
 -- to the transactions containing that item.
 --
 
--- Transactions read in in chunks and converted into mini-TIDMaps, which are then finally combined with mergeTIDMaps
+-- Transactions read in in chunks and converted into mini-TIDMaps, 
+-- which are then finally combined with mergeTIDMaps
 mergeTIDMaps :: [TIDMap] -> TIDMap
 mergeTIDMaps = nAryFold n (IntMap.unionsWith IntSet.union)
   where n=50
 
--- This takes a list of (transaction ID, transaction) pairs and makes it into a map from transaction ID's to orders.
+-- This takes a list of (transaction ID, transaction) pairs and 
+-- pivots it into a map from transaction ID's to orders.
 -- Each transaction must have distinct items in ascending order.
 transposeOrders :: [(Int, [Int])] -> TIDMap
 transposeOrders =  IntMap.unionsWith IntSet.union . map transposeRow
@@ -118,7 +125,7 @@ readTIDMapFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do
   let mOrders = map mkOrder inputLines :: [Maybe [Int]]
   let mTIDOrderPairs = zipWith (fmap . (,)) [1..] mOrders :: [Maybe (Int, [Int])]
   -- These are the mini-TIDMaps
-  let tidmaps = withParStrat $ map (fmap transposeOrders . sequence) $ chunksOf n mTIDOrderPairs :: [Maybe TIDMap]
+  let tidmaps = withParStrat $ map (fmap transposeOrders . sequence) $ chunksOf n mTIDOrderPairs
   let mTIDMap = mergeTIDMaps <$> sequence tidmaps :: Maybe TIDMap
   case mTIDMap of
     Just tidmap -> return $ Right (tidmap, length inputLines)
@@ -130,7 +137,6 @@ readTIDMapFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do
     err = "Error: '" ++ filename ++ "' incorrectly formatted.\
           \    It should contain newline-separated transactions,\
           \    Items in the transaction must be in ascending order."
-
 
 --
 -- Code below is the main function and supporting characters.
@@ -174,7 +180,7 @@ main = do
          putStrLn "The paths to leaves are:"
          let fForest = withStrategy aprioriStrategy $ getFreqForest minSupCount tidmap
          mapM_ print $ getPathsToLeaves fForest
-         -- mapM_ print $ fmap IntSet.toList $ reverse $ toMaximalItemsets $ getPathsToLeaves fForest
+         -- fmap IntSet.toList $ reverse $ toMaximalItemsets $ getPathsToLeaves fForest
 
    _usage -> do
      progName <- Environment.getProgName

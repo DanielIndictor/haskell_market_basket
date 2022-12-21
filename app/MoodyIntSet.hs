@@ -23,7 +23,8 @@ instance Show MoodyIntSet where
   show (Sparse _ s) = show s
 
 instance Eq MoodyIntSet where
-  (Sparse size1 list1) == (Sparse size2 list2) = (size1==size2) || (list1==list2)
+  (Sparse size1 list1) == (Sparse size2 list2) = 
+    (size1==size2) || (list1==list2)
 
 empty :: MoodyIntSet
 empty = Sparse 0 []
@@ -50,7 +51,8 @@ unions :: Foldable f => f MoodyIntSet -> MoodyIntSet
 unions = Foldable.foldl' union empty
 
 intersection :: MoodyIntSet -> MoodyIntSet -> MoodyIntSet
-intersection (Sparse _ s1) (Sparse _ s2) = let (s, int) = intersect' (0::Int) s1 s2 in Sparse s int
+intersection (Sparse _ s1) (Sparse _ s2) = let (s, int) = intersect' (0::Int) s1 s2 
+                                           in Sparse s int
   where 
     intersect' s as@(a1:tailAs) bs@(b1:tailBs) = case a1 `compare` b1 of
       LT -> let (s', int') = intersect' s tailAs     bs in (s', int')
