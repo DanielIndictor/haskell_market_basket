@@ -1,5 +1,12 @@
 module MoodyIntSet where
 
+-- I wrote this module to see if a flat set implemented as 
+-- a simple ascending list would be faster than IntSet. 
+-- It was so slow in the "sparse" mode that I ended up not finishing it.
+-- The idea _was_ to have a "Sparse" and "Dense" mode,
+-- so that unions could be done with lists, 
+-- and that intersections could be done with packed Ints (Data.Vector).
+
 import qualified Data.Foldable as Foldable
 import Control.DeepSeq (NFData, rnf)
 -- import qualified Data.Vector as V
@@ -7,7 +14,6 @@ import Control.DeepSeq (NFData, rnf)
 data MoodyIntSet = Sparse { size :: !Int, toList :: ![Int] }
 
 -- | Packed !(V.Vector Int)
---
 
 instance NFData MoodyIntSet where
   rnf (Sparse siz list) = siz `seq` rnf list
