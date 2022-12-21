@@ -1,6 +1,6 @@
 module Main where
 
-import Utils
+import Utils -- Factored out general(ish) functions for safekeeping.
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
@@ -16,33 +16,23 @@ import Control.Monad.Loops (whileM)
 import Data.Foldable (foldl')
 import Data.List (sortOn)
 
-type TIDMap = IntMap.IntMap IntSet.IntSet
+--
+-- Core algorithm logic below.
+--
 
+type TIDMap = IntMap.IntMap IntSet.IntSet
 type ITree = Tree.Tree Int
 
--- Terminology comes from max-miner paper, except for "getOrders", 
+-- Terminology below comes from max-miner paper, except for "getOrders", 
 -- which stands for "the set of transactions containing the itemset represented by this node."
 data ISeed = ISeed { getLastItemInHead :: !Int, getTail :: ![Int], getOrders :: !IntSet.IntSet }
   deriving (Show, Eq)
 
-aprioriStrategy :: Strategy [ITree]
-aprioriStrategy = parList stratITree
-  where 
-    stratITree :: Strategy ITree
-    stratITree (Tree.Node rLabel children) = do 
-      children' <- parListChunk 10 rdeepseq children
-      return $ Tree.Node rLabel children'
-
-getPathsToLeaves :: [Tree.Tree a] -> [[a]]
-getPathsToLeaves = concatMap (Tree.foldTree f)
-  where
-    f x [] = [[x]]
-    f x paths = (x:) <$> concat paths
 
 genPruneCands :: Int -> TIDMap -> ISeed -> [(Int, IntSet.IntSet)]
 genPruneCands minSup tidMap (ISeed _ unChildren orders) = 
   [ (candidate, candidateOrders) 
-  | candidate <- unChildren
+  | candidate <- unChildren -- Generate candidates
   , let candidateOrders = IntSet.intersection orders (tidMap IntMap.! candidate)
   , minSup <= IntSet.size candidateOrders  -- Pruning step
   ]
@@ -58,24 +48,44 @@ packCands candidates = let (items, orders) = unzip candidates
   in zipWith packSeed (headAndTails items) orders
   where packSeed (item, uncheckedItems) order = ISeed item uncheckedItems order
 
+-- This function gives an expression (search tree) for frequent itemsets.
 getFreqForest :: Int -> TIDMap -> [ITree]
-getFreqForest minSup tidMap = rootItemsets
+getFreqForest minSup tidMap = Tree.unfoldForest blowup oneSeeds
   where 
     candGenPruner = genPruneCands minSup tidMap
-    rootItemsets = Tree.unfoldForest blowup oneSeeds
-    -- Here we bootstrap search similarly to genPruneCands
-    oneSeeds :: [ISeed]
+    oneSeeds :: [ISeed]  -- One-itemsets are the base-case for search.
     oneSeeds = packCands $ maxMinerCandReorder $ bootstrapGenPruneCands minSup tidMap 
 
     blowup :: ISeed -> (Int, [ISeed])
     blowup seed = (getLastItemInHead seed, (packCands . maxMinerCandReorder . candGenPruner) seed)
 
+-- Decouple parallelization strategy from evaluation, as advised in class.
+aprioriStrategy :: Strategy [ITree]
+aprioriStrategy = parList stratITree
+  where 
+    stratITree :: Strategy ITree
+    stratITree (Tree.Node rLabel children) = do 
+      children' <- parListChunk 10 rdeepseq children
+      return $ Tree.Node rLabel children'
+
+-- This is a debug function that, inefficiently,
+-- takes all the paths from root to leaf in the search tree
+-- and filters out non-maximal itemsets. For example,
+-- the itemset pair [1,2,3] and [1,3] are not maximal.
+-- A maximal set of itemsets has the property that no itemset
+-- is a subset of the others.
 toMaximalItemsets :: [[Int]] -> [IntSet.IntSet]
 toMaximalItemsets itemsets = foldl' prependIfNew [] itemsets'
   where 
     itemsets' = sortOn (\set -> ((-1)* IntSet.size set, set)) $ fmap IntSet.fromList itemsets
     prependIfNew maximals unseenISet | any (IntSet.isSubsetOf unseenISet) maximals = maximals
     prependIfNew maximals unseenISet  = unseenISet : maximals
+
+--
+-- The code below provides functions for reading in a list of transactions
+-- from some file and converting them into a map from items 
+-- to the transactions containing that item.
+--
 
 -- Transactions read in in chunks and converted into mini-TIDMaps, which are then finally combined with mergeTIDMaps
 mergeTIDMaps :: [TIDMap] -> TIDMap
@@ -121,6 +131,11 @@ readTIDMapFromFile filename = IO.withFile filename IO.ReadMode (\handle -> do
           \    It should contain newline-separated transactions,\
           \    Items in the transaction must be in ascending order."
 
+
+--
+-- Code below is the main function and supporting characters.
+--
+
 data NumericArg = ArgPercentage !Rational | ArgRawCount !Int
 
 -- Tries to read the minimum support as a count or as a percentage of transactions.
@@ -158,7 +173,8 @@ main = do
          print minSupCount
          putStrLn "The paths to leaves are:"
          let fForest = withStrategy aprioriStrategy $ getFreqForest minSupCount tidmap
-         mapM_ print $ fmap IntSet.toList $ reverse $ toMaximalItemsets $ getPathsToLeaves fForest
+         mapM_ print $ getPathsToLeaves fForest
+         -- mapM_ print $ fmap IntSet.toList $ reverse $ toMaximalItemsets $ getPathsToLeaves fForest
 
    _usage -> do
      progName <- Environment.getProgName

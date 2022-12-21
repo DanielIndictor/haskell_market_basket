@@ -2,6 +2,13 @@ module Utils where
 
 import Control.Parallel.Strategies (NFData, parMap, rdeepseq)
 import Data.List (sort)
+import qualified Data.Tree as Tree
+
+getPathsToLeaves :: [Tree.Tree a] -> [[a]]
+getPathsToLeaves = concatMap (Tree.foldTree f)
+  where
+    f x [] = [[x]]
+    f x paths = (x:) <$> concat paths
 
 sort2dList :: Ord a => [[a]] -> [[a]]
 sort2dList = sort . map sort
